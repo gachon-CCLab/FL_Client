@@ -47,6 +47,9 @@ auprc=0
 
 next_gl_model= 0 # 글로벌 모델 버전
 
+# W&B 제어
+wb_controller = 0
+
 # FL client 상태 확인
 app = FastAPI()
 
@@ -189,8 +192,8 @@ def get_info():
 
 @app.get("/start/{Server_IP}")
 async def flclientstart(background_tasks: BackgroundTasks, Server_IP: str):
-    global status, model, next_gl_model
-
+    global status, model, next_gl_model, wb_controller
+    
     # client_manager 주소
     client_res = requests.get('http://localhost:8003/info/')
 
@@ -199,6 +202,13 @@ async def flclientstart(background_tasks: BackgroundTasks, Server_IP: str):
     
     # 다음 global model 버전
     next_gl_model = latest_gl_model_v + 1
+
+    if wb_controller == 0:
+        # wandb login and init
+        wandb.login(key='6266dbc809b57000d78fb8b163179a0a3d6eeb37')
+        wandb.init(entity='ccl-fl', project='fl-client-ccl', name= 'client %s_V%s'%(client_num,next_gl_model), dir='/')
+
+        wb_controller = 1
 
     logging.info('bulid model')
 
@@ -212,22 +222,20 @@ async def flclientstart(background_tasks: BackgroundTasks, Server_IP: str):
 
 async def flower_client_start():
     logging.info('FL learning')
-    global model, status, x_train, y_train
+    global model, status
 
     # 환자별로 partition 분리 => 개별 클라이언트 적용
     (x_train, y_train), (x_test, y_test) = load_partition()
+    await asyncio.sleep(30) # data download wait
 
     model = build_model()
 
-    # wandb login and init
-    wandb.login(key='6266dbc809b57000d78fb8b163179a0a3d6eeb37')
-    wandb.init(entity='ccl-fl', project='fl-client', name= 'client %s_V%s'%(client_num,next_gl_model), dir='/')
-    
     try:
         loop = asyncio.get_event_loop()
         client = PatientClient(model, x_train, y_train, x_test, y_test)
         # logging.info(f'fl-server-ip: {status.FL_server_IP}')
         # await asyncio.sleep(23)
+        print('server IP: ', status.FL_server_IP)
         request = partial(fl.client.start_numpy_client, server_address=status.FL_server_IP, client=client)
         await loop.run_in_executor(None, request)
 
@@ -261,11 +269,12 @@ async def model_save():
 
 # client manager에서 train finish 정보 확인
 async def notify_fin():
-    global status, loss, accuracy, precision, recall, auc, auprc, f1_score, next_gl_model
+    global status, loss, accuracy, precision, recall, auc, auprc, f1_score, next_gl_model, wb_controller
     
     # wandb 종료
     wandb.finish()
-    
+    wb_controller = 0
+
     status.FL_client_start = False
 
     # 최종 성능 결과
@@ -290,7 +299,7 @@ async def notify_fail():
     global status
 
     # wandb 종료
-    wandb.finish()
+    # wandb.finish()
 
     logging.info('notify_fail start')
 
@@ -331,6 +340,7 @@ def load_partition():
     return (train_features, train_labels), (test_features, test_labels)
 
 if __name__ == "__main__":
+
     try:
         # client api 생성 => client manager와 통신하기 위함
         uvicorn.run("app:app", host='0.0.0.0', port=8002, reload=True)
